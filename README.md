@@ -70,14 +70,16 @@ Per binary:
 Compressed binaries:
 
 - the `iwlyfmbp` container structure: declared size, block size, algorithm
-  (LZO1X or UCL/NRV2B), block map and stored sizes.
+  (LZO1X or UCL/NRV2B), block map and stored sizes;
+- **LZO1X payloads are decompressed**, block by block, with a decoder written here and
+  checked against streams produced by the reference library itself. UCL/NRV2B is refused
+  rather than guessed: it will be written the same way, against the library.
 
 ## Not there yet
 
-- **Decompression of `iwlyfmbp` payloads.** The container is parsed, the payload is not
-  unpacked: LZO1X and NRV2B decoders are worth writing only when they can be checked
-  against a real QNX sample. `decompress()` refuses instead of returning bytes nobody can
-  trust, and the analysis reports what it can without it.
+- **UCL/NRV2B payloads.** The LZO1X side is written and verified; the NRV2B decoder is
+  not, so `decompress()` refuses those containers instead of returning bytes nobody has
+  checked.
 - On-device review script for QNX 7/8, with a summary and a diff between two runs.
 - Testing against real QNX images (Raspberry Pi quick-start image, QEMU x86 target).
 
@@ -85,7 +87,12 @@ Compressed binaries:
 
 Fixtures are compiled at test time with explicit flags, so results do not depend on the
 hardening defaults of the distribution. IFS images are assembled in memory by a builder
-written from the documented layout, so a disagreement about an offset fails the tests:
+written from the documented layout, so a disagreement about an offset fails the tests.
+
+The LZO1X decoder is checked against streams produced by liblzo2 itself through
+`tools/lzo_ref.c`: a shared misunderstanding of the format cannot pass unnoticed, because
+the reference bytes come from the library QNX links against. Where no compiler or no
+liblzo2 is available those tests skip instead of passing quietly.
 
 ```bash
 pip install -e ".[dev]"
