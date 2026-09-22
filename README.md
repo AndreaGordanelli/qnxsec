@@ -1,7 +1,8 @@
 # qnxsec
 
-Static analysis for QNX firmware and systems: what a binary is protected with, what
-system surface it exposes, and which binaries are worth looking at first.
+Static analysis for QNX firmware and systems: pull the boot image filesystem out of a
+firmware dump, see what each binary is protected with, what system surface it exposes,
+what the boot script really starts, and which binaries are worth looking at first.
 
 Written from scratch, standard library only, read-only. It never executes what it
 analyses and never needs a QNX toolchain to run.
@@ -10,8 +11,8 @@ analyses and never needs a QNX toolchain to run.
 
 QNX tooling has a long history of good research and short-lived scripts. Most of it
 stopped at BlackBerry 10 in 2016 and needs a Windows toolchain to build. This is a
-small, self-contained replacement: point it at an extracted firmware, a mounted image
-or a live QNX target and get a report you can act on.
+small, self-contained replacement: point it at a firmware dump, an extracted tree or a
+live QNX target and get a report you can act on.
 
 It is a clean-room implementation: no code taken from other QNX tools, and no QNX
 proprietary files are distributed here.
@@ -26,45 +27,65 @@ python -m qnxsec.cli --help
 ## Use
 
 ```bash
-qnxsec file /path/to/binary                     # card for one binary
+qnxsec dump firmware.bin --extract unpacked      # the whole pipeline in one go
+qnxsec ifs firmware.bin --script                 # list the IFS images inside a dump
+qnxsec bootscript unpacked/image1/proc/boot/.script
+qnxsec compressed unpacked/image1/bin/devc-ser8250
+qnxsec firmware unpacked/image1 --targets 20     # per-binary analysis of a tree
+qnxsec surface unpacked/image1 --dot graph.dot   # who publishes which QNX name
 qnxsec file /path/to/binary --json
-qnxsec firmware /path/to/extracted-firmware     # analyse a tree
-qnxsec firmware / --exclude proc sys --targets 20
-qnxsec firmware / --json --details > report.json
 ```
+
+Nothing is executed and nothing is written outside the directory you pass to `--extract`.
 
 ## What it reports
 
+From a firmware dump:
+
+- every `imagefs` signature found, both byte orders, and the chain of images;
+- the entry list with modes, owners, symlinks and devices;
+- extraction that preserves modes, including setuid bits;
+- the boot script found in the image, analysed (see below).
+
+From a boot script or buildfile:
+
+- blocks (`.bootstrap`, `.script`), the commands they run, their arguments and environment;
+- the services started, the devices waited for, and the image entries with their modes;
+- signals: world-writable permissions, services exposed at boot (`telnetd`, `ftpd`,
+  `qconn`), the root filesystem remounted read-write, credentials sitting in the script,
+  devices used without a `waitfor`.
+
 Per binary:
 
-- protections: canary, NX, PIE, RELRO (partial/full), FORTIFY;
-- which ones are missing, plus a score;
+- protections: canary, NX, PIE, RELRO (partial/full), FORTIFY; which ones are missing;
 - QNX surface: `resmgr_attach`, `name_attach`, `MsgReceive`/`MsgSend`, `procmgr_ability`,
   `iofunc_*`, `dispatch_*`, shared memory, timers;
 - privilege symbols: `setuid`, `setgid`, `chroot`, `sysctl`, `chown`;
 - execution and classic risk symbols: `system`, `popen`, `exec*`, `dlopen`, `strcpy`,
   `sprintf`, `gets`;
-- strings of interest: `/pps/`, `/dev/shmem`, `/dev/mem`, `/proc/boot`, `/dev/name`,
-  configuration files, secrets.
+- strings of interest: `/pps/`, `/dev/shmem`, `/dev/mem`, `/proc/boot`, configuration
+  files, secrets;
+- a score and a ranked list of targets for a whole tree.
 
-For a tree:
+Compressed binaries:
 
-- counts, architectures, protection coverage in percent;
-- setuid/setgid binaries and what they are missing;
-- a ranked list of targets (for example: setuid, no canary, publishes in `/dev`);
-- QNX system surface and recurring hints.
+- the `iwlyfmbp` container structure: declared size, block size, algorithm
+  (LZO1X or UCL/NRV2B), block map and stored sizes.
 
-## Roadmap
+## Not there yet
 
-- IFS image extraction: pull the boot image filesystem out of a firmware dump;
-- decompression of compressed QNX ELF (`iwlyfmbp`, LZO/UCL);
-- on-device review script for QNX 7/8, with a summary and a diff between two runs;
-- testing against real QNX images (Raspberry Pi quick-start image, QEMU x86 target).
+- **Decompression of `iwlyfmbp` payloads.** The container is parsed, the payload is not
+  unpacked: LZO1X and NRV2B decoders are worth writing only when they can be checked
+  against a real QNX sample. `decompress()` refuses instead of returning bytes nobody can
+  trust, and the analysis reports what it can without it.
+- On-device review script for QNX 7/8, with a summary and a diff between two runs.
+- Testing against real QNX images (Raspberry Pi quick-start image, QEMU x86 target).
 
 ## Tests
 
 Fixtures are compiled at test time with explicit flags, so results do not depend on the
-hardening defaults of the distribution:
+hardening defaults of the distribution. IFS images are assembled in memory by a builder
+written from the documented layout, so a disagreement about an offset fails the tests:
 
 ```bash
 pip install -e ".[dev]"
