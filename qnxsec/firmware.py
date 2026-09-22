@@ -1,6 +1,6 @@
-"""Scansione di un albero — firmware estratto, immagine montata o sistema QNX vivo.
+"""Walking a tree — an extracted firmware, a mounted image or a live QNX system.
 
-Sola lettura: si guarda tutto, non si esegue e non si scrive niente su disco.
+Read-only: it looks at everything, executes nothing and writes nothing to disk.
 """
 from __future__ import annotations
 
@@ -11,90 +11,90 @@ from pathlib import Path
 
 from . import checks
 
-DIMENSIONE_MASSIMA_STRINGHE = 64 * 1024 * 1024
+MAX_SIZE_FOR_STRINGS = 64 * 1024 * 1024
 
 
-def file_dell_albero(radice: str | Path, escludi: tuple[str, ...] = ()):
-    """Percorre l'albero e restituisce (percorso, modo, dimensione) dei file regolari."""
-    for cartella, sottocartelle, nomi in os.walk(radice, followlinks=False):
-        sottocartelle.sort()
-        for nome in sorted(nomi):
-            percorso = Path(cartella) / nome
-            if any(parte in percorso.parts for parte in escludi):
+def walk_tree(root: str | Path, exclude: tuple[str, ...] = ()):
+    """Walk the tree and yield (path, mode, size) for every regular file."""
+    for folder, subfolders, names in os.walk(root, followlinks=False):
+        subfolders.sort()
+        for name in sorted(names):
+            path = Path(folder) / name
+            if any(part in path.parts for part in exclude):
                 continue
             try:
-                info = percorso.stat()
+                info = path.stat()
             except OSError:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 continue
-            yield percorso, info.st_mode, info.st_size
+            yield path, info.st_mode, info.st_size
 
 
-def analizza(radice: str | Path, quanti_bersagli: int = 15,
-             escludi: tuple[str, ...] = (), avanzamento=None) -> dict:
-    """Analizza tutti i binari dell'albero e restituisce riassunto più schede."""
-    radice = Path(radice)
-    schede, altri, compressi = [], 0, 0
-    quanti = 0
-    for percorso, modo, dimensione in file_dell_albero(radice, escludi):
-        quanti += 1
-        if avanzamento and quanti % 200 == 0:
-            avanzamento(quanti)
-        scheda = checks.scheda(percorso, modo,
-                               stringhe=dimensione <= DIMENSIONE_MASSIMA_STRINGHE)
-        if scheda["tipo_file"] == "elf":
-            schede.append(scheda)
-        elif scheda["tipo_file"] == "elf-compresso-qnx":
-            compressi += 1
-        elif dimensione > 0:
-            altri += 1
-    riassunto = riassumi(radice, schede, quanti, compressi, altri, quanti_bersagli)
-    return {"riassunto": riassunto, "schede": schede}
+def analyse(root: str | Path, targets: int = 15, exclude: tuple[str, ...] = (),
+            progress=None) -> dict:
+    """Analyse every binary in the tree and return a summary plus the per-file cards."""
+    root = Path(root)
+    cards, others, compressed = [], 0, 0
+    count = 0
+    for path, mode, size in walk_tree(root, exclude):
+        count += 1
+        if progress and count % 200 == 0:
+            progress(count)
+        entry = checks.card(path, mode, strings=size <= MAX_SIZE_FOR_STRINGS)
+        if entry["file_type"] == "elf":
+            cards.append(entry)
+        elif entry["file_type"] == "qnx-compressed-elf":
+            compressed += 1
+        elif size > 0:
+            others += 1
+    summary = summarise(root, cards, count, compressed, others, targets)
+    return {"summary": summary, "cards": cards}
 
 
-def riassumi(radice, schede: list[dict], quanti: int, compressi: int, altri: int,
-             quanti_bersagli: int) -> dict:
-    elfi = [s for s in schede if s["tipo_file"] == "elf"]
-    architetture = Counter(s["architettura"] for s in elfi)
-    protezioni = {
-        "conta": len(elfi),
-        "canary": sum(1 for s in elfi if s["protezioni"]["canary"]),
-        "pie": sum(1 for s in elfi if s["protezioni"]["pie"]),
-        "nx": sum(1 for s in elfi if s["protezioni"]["nx"] is True),
-        "relro": sum(1 for s in elfi if s["protezioni"]["relro"] != "assente"),
-        "senza_canary": sorted(s["nome"] for s in elfi if not s["protezioni"]["canary"]),
+def summarise(root, cards: list[dict], count: int, compressed: int, others: int,
+              targets: int) -> dict:
+    elfs = [entry for entry in cards if entry["file_type"] == "elf"]
+    architectures = Counter(entry["architecture"] for entry in elfs)
+    protections = {
+        "count": len(elfs),
+        "canary": sum(1 for entry in elfs if entry["protections"]["canary"]),
+        "pie": sum(1 for entry in elfs if entry["protections"]["pie"]),
+        "nx": sum(1 for entry in elfs if entry["protections"]["nx"] is True),
+        "relro": sum(1 for entry in elfs if entry["protections"]["relro"] != "none"),
+        "without_canary": sorted(entry["name"] for entry in elfs
+                                 if not entry["protections"]["canary"]),
     }
-    privilegiati = []
-    for scheda in sorted(schede, key=lambda s: -s["punteggio"]):
-        if not (scheda["setuid"] or scheda["setgid"]):
+    privileged = []
+    for entry in sorted(cards, key=lambda item: -item["score"]):
+        if not (entry["setuid"] or entry["setgid"]):
             continue
-        etichetta = "setuid" if scheda["setuid"] else "setgid"
-        assenti = ", ".join(scheda["protezioni_assenti"]) or "niente"
-        privilegiati.append(f"{scheda['nome']} ({scheda['architettura']}, {etichetta}) "
-                            f"manca: {assenti}")
-    superficie = Counter(voce["etichetta"] for scheda in elfi for voce in scheda["superficie"])
-    indizi = Counter(voce["etichetta"] for scheda in elfi for voce in scheda["indizi"])
-    bersagli = []
-    for scheda in sorted(elfi, key=lambda s: (-s["punteggio"], s["nome"])):
-        if not scheda["bersaglio"]:
+        kind = "setuid" if entry["setuid"] else "setgid"
+        missing = ", ".join(entry["missing_protections"]) or "nothing"
+        privileged.append(f"{entry['name']} ({entry['architecture']}, {kind}) "
+                          f"missing: {missing}")
+    surface = Counter(item["label"] for entry in elfs for item in entry["surface"])
+    hints = Counter(item["label"] for entry in elfs for item in entry["hints"])
+    ranked = []
+    for entry in sorted(elfs, key=lambda item: (-item["score"], item["name"])):
+        if not entry["target"]:
             continue
-        manca = ", ".join(scheda["protezioni_assenti"]) or "niente"
-        superficie_voce = ", ".join(v["etichetta"] for v in scheda["superficie"][:2]) or "—"
-        privilegio = " setuid" if scheda["setuid"] else ""
-        bersagli.append(f"{scheda['punteggio']:>3}  {scheda['nome']} ({scheda['architettura']},"
-                        f"{privilegio}) — manca: {manca} — {superficie_voce}")
+        missing = ", ".join(entry["missing_protections"]) or "nothing"
+        surface_item = ", ".join(item["label"] for item in entry["surface"][:2]) or "—"
+        privilege = " setuid" if entry["setuid"] else ""
+        ranked.append(f"{entry['score']:>3}  {entry['name']} ({entry['architecture']},"
+                      f"{privilege}) — missing: {missing} — {surface_item}")
     return {
-        "radice": str(radice),
-        "file": quanti,
-        "elf": len(elfi),
-        "compressi": compressi,
-        "altri_binari": altri,
-        "architetture": dict(architetture),
-        "protezioni": protezioni,
-        "privilegiati": privilegiati,
-        "bersagli": bersagli[:quanti_bersagli],
-        "bersagli_totali": len(bersagli),
-        "superficie": dict(superficie),
-        "indizi": dict(indizi),
+        "root": str(root),
+        "files": count,
+        "elf": len(elfs),
+        "compressed": compressed,
+        "other_binaries": others,
+        "architectures": dict(architectures),
+        "protections": protections,
+        "privileged": privileged,
+        "targets": ranked[:targets],
+        "targets_total": len(ranked),
+        "surface": dict(surface),
+        "hints": dict(hints),
     }

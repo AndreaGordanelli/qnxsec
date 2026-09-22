@@ -1,209 +1,209 @@
-"""Controlli su un singolo binario: protezioni presenti, superficie QNX, indizi nelle stringhe.
+"""Checks for a single binary: which protections are present, how much QNX surface it
+exposes, and what its strings give away.
 
-L'idea è rispondere a due domande diverse:
-  - quanto è *sfruttabile* questo binario (canary, PIE, NX, RELRO, FORTIFY);
-  - quanta *superficie* espone (resource manager, canali IPC, abilità, comandi eseguiti).
+Two different questions:
+  - how *exploitable* is this binary (canary, PIE, NX, RELRO, FORTIFY);
+  - how much *surface* does it expose (resource manager, IPC channels, abilities, commands).
 
-Nessuna esecuzione: si legge e basta.
+Nothing is executed: this only reads.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from .elf import Elfo, ErroreElf, compr_elf_qnx, e_elf
+from .elf import Elf, ElfError, is_elf, is_qnx_compressed
 
-# simboli che dicono "questo processo parla con il resto del sistema"
-SUPERFICIE_QNX = {
-    "resmgr_attach": "resource manager (pubblica in /dev)",
-    "name_attach": "canale IPC con nome",
-    "message_attach": "gestore di messaggi",
-    "pulse_attach": "gestore di pulse",
-    "MsgReceive": "riceve messaggi",
-    "MsgSend": "invia messaggi",
-    "MsgReply": "risponde ai messaggi",
-    "MsgDeliverEvent": "consegna eventi",
-    "MsgReceivePulse": "riceve pulse",
-    "procmgr_ability": "abilità di processo",
-    "secpol": "policy di sicurezza",
-    "iofunc_": "libreria risorse (iofunc)",
-    "dispatch_": "dispatch dei messaggi",
-    "ThreadCtl": "controllo thread (operazioni privilegiate)",
-    "shm_open": "memoria condivisa",
-    "mq_open": "code di messaggi POSIX",
+# symbols that say "this process talks to the rest of the system"
+QNX_SURFACE = {
+    "resmgr_attach": "resource manager (publishes in /dev)",
+    "name_attach": "named IPC channel",
+    "message_attach": "message handler",
+    "pulse_attach": "pulse handler",
+    "MsgReceive": "receives messages",
+    "MsgSend": "sends messages",
+    "MsgReply": "replies to messages",
+    "MsgDeliverEvent": "delivers events",
+    "MsgReceivePulse": "receives pulses",
+    "procmgr_ability": "process ability",
+    "secpol": "security policy",
+    "iofunc_": "resource library (iofunc)",
+    "dispatch_": "message dispatch",
+    "ThreadCtl": "thread control (privileged operations)",
+    "shm_open": "shared memory",
+    "mq_open": "POSIX message queues",
     "timer_create": "timer",
-    "inotify": "notifiche file",
+    "inotify": "file notifications",
 }
 
-# simboli che dicono "questo processo può cambiare i privilegi"
-PRIVILEGIO = {
-    "setuid": "cambia utente",
-    "seteuid": "cambia utente effettivo",
-    "setresuid": "cambia utente reale/effettivo",
-    "setgid": "cambia gruppo",
-    "setegid": "cambia gruppo effettivo",
-    "setgroups": "cambia gruppi",
-    "chroot": "cambia radice",
-    "sysctl": "parametri di kernel",
-    "chmod": "cambia permessi",
-    "fchmod": "cambia permessi",
-    "chown": "cambia proprietario",
-    "fchown": "cambia proprietario",
+# symbols that say "this process can change its privileges"
+PRIVILEGE = {
+    "setuid": "changes user",
+    "seteuid": "changes effective user",
+    "setresuid": "changes real/effective user",
+    "setgid": "changes group",
+    "setegid": "changes effective group",
+    "setgroups": "changes groups",
+    "chroot": "changes root",
+    "sysctl": "kernel parameters",
+    "chmod": "changes permissions",
+    "fchmod": "changes permissions",
+    "chown": "changes owner",
+    "fchown": "changes owner",
 }
 
-# simboli di esecuzione e funzioni storicamente insidiose
-ESECUZIONE = {
-    "system": "esegue comandi di shell",
-    "popen": "esegue comandi di shell",
-    "execve": "esegue programmi",
-    "execl": "esegue programmi",
-    "execvp": "esegue programmi",
-    "posix_spawn": "avvia processi",
-    "spawn": "avvia processi",
-    "dlopen": "carica librerie a runtime",
+# execution symbols and functions with a long history of trouble
+EXECUTION = {
+    "system": "runs shell commands",
+    "popen": "runs shell commands",
+    "execve": "runs programs",
+    "execl": "runs programs",
+    "execvp": "runs programs",
+    "posix_spawn": "spawns processes",
+    "spawn": "spawns processes",
+    "dlopen": "loads libraries at runtime",
 }
-INSIDIOSE = {"strcpy", "strcat", "sprintf", "gets", "mktemp", "alloca", "vsprintf", "scanf"}
+RISKY_FUNCTIONS = {"strcpy", "strcat", "sprintf", "gets", "mktemp", "alloca", "vsprintf", "scanf"}
 
-# percorsi e parole che valgono un secondo sguardo: sottostringhe, non espressioni,
-# perché su un firmware intero la differenza di velocità si sente tutta.
-INDIZI: list[tuple[tuple[str, ...], str, bool]] = [
-    (("/pps/",), "PPS: oggetti pubblicati", False),
-    (("/dev/shmem",), "memoria condivisa in /dev/shmem", False),
-    (("/dev/mem",), "accesso diretto alla memoria fisica", False),
-    (("/proc/boot",), "immagine di boot", False),
-    (("/dev/name",), "namespace IPC", False),
-    (("/dev/io-",), "driver I/O", False),
-    (("LD_PRELOAD", "LD_LIBRARY_PATH"), "variabili di caricamento librerie", False),
-    ((".conf",), "file di configurazione", False),
+# paths and words worth a second look: plain substrings, not regular expressions, because
+# across a whole firmware the difference in speed is noticeable.
+HINTS: list[tuple[tuple[str, ...], str, bool]] = [
+    (("/pps/",), "PPS: published objects", False),
+    (("/dev/shmem",), "shared memory in /dev/shmem", False),
+    (("/dev/mem",), "direct physical memory access", False),
+    (("/proc/boot",), "boot image", False),
+    (("/dev/name",), "IPC namespace", False),
+    (("/dev/io-",), "I/O drivers", False),
+    (("LD_PRELOAD", "LD_LIBRARY_PATH"), "library loading variables", False),
+    ((".conf",), "configuration file", False),
     (("password", "passwd", "secret", "api_key", "api-key", "token="),
-     "parola chiave o segreto", True),
-    (("slog2", "/dev/slog"), "log di sistema", False),
-    (("pidin", "on -t", "/proc/"), "comandi e percorsi di sistema", True),
-    (("debug", "dumper", "backdoor"), "indizio di debug", True),
+     "keyword or secret", True),
+    (("slog2", "/dev/slog"), "system log", False),
+    (("pidin", "on -t", "/proc/"), "system commands and paths", True),
+    (("debug", "dumper", "backdoor"), "debug hint", True),
 ]
 
 
-def _simboli_in(elfo: Elfo, tabella: dict) -> list[dict]:
-    trovati = []
-    for chiave, etichetta in tabella.items():
-        if elfo.ha_simbolo(chiave):
-            trovati.append({"simbolo": chiave, "etichetta": etichetta})
-    return trovati
+def _symbols_in(elf: Elf, table: dict) -> list[dict]:
+    found = []
+    for key, label in table.items():
+        if elf.has_symbol(key):
+            found.append({"symbol": key, "label": label})
+    return found
 
 
-def e_qnx(elfo: Elfo) -> bool:
-    """Dice se il binario è QNX: dai simboli, dall'interprete o dalle stringhe tipiche."""
-    if any(nome.startswith(("Msg", "resmgr_", "iofunc_", "dispatch_", "procmgr_", "secpol"))
-           for nome in elfo.simboli):
+def is_qnx(elf: Elf) -> bool:
+    """Whether this binary is QNX: from its symbols, its interpreter or its libraries."""
+    if any(name.startswith(("Msg", "resmgr_", "iofunc_", "dispatch_", "procmgr_", "secpol"))
+           for name in elf.symbols):
         return True
-    if "qnx" in elfo.interprete.lower() or "procnto" in elfo.interprete.lower():
+    if "qnx" in elf.interpreter.lower() or "procnto" in elf.interpreter.lower():
         return True
-    return any(nome.startswith(("libc.so", "libc-")) and "qnx" in nome.lower()
-               for nome in elfo.richieste)
+    return any("qnx" in name.lower() for name in elf.needed)
 
 
-def protezioni(elfo: Elfo) -> dict:
+def protections(elf: Elf) -> dict:
     return {
-        "canary": elfo.canary,
-        "nx": elfo.nx,
-        "pie": elfo.pie,
-        "relro": elfo.relro,
-        "fortify": elfo.fortify,
+        "canary": elf.canary,
+        "nx": elf.nx,
+        "pie": elf.pie,
+        "relro": elf.relro,
+        "fortify": elf.fortify,
     }
 
 
-def mancanti(elfo: Elfo) -> list[str]:
-    """Protezioni assenti, in ordine di quanto pesano per chi attacca."""
-    assenti = []
-    if not elfo.canary:
-        assenti.append("canary")
-    if not elfo.pie and elfo.eseguibile:
-        assenti.append("PIE")
-    if elfo.nx is False:
-        assenti.append("NX")
-    if elfo.relro == "assente":
-        assenti.append("RELRO")
-    return assenti
+def missing_protections(elf: Elf) -> list[str]:
+    """Missing protections, ordered by how much they matter to an attacker."""
+    missing = []
+    if not elf.canary:
+        missing.append("canary")
+    if not elf.pie and elf.executable:
+        missing.append("PIE")
+    if elf.nx is False:
+        missing.append("NX")
+    if elf.relro == "none":
+        missing.append("RELRO")
+    return missing
 
 
-def indizi_stringhe(elfo: Elfo, limite: int = 25) -> list[dict]:
-    trovati, visti = [], set()
-    for stringa in elfo.stringhe():
-        minuscola = stringa.lower()
-        for parole, etichetta, senza_maiuscole in INDIZI:
-            if any(parola in (minuscola if senza_maiuscole else stringa) for parola in parole):
-                chiave = (etichetta, stringa[:120])
-                if chiave not in visti:
-                    visti.add(chiave)
-                    trovati.append({"etichetta": etichetta, "stringa": stringa[:120]})
+def string_hints(elf: Elf, limit: int = 25) -> list[dict]:
+    found, seen = [], set()
+    for text in elf.strings():
+        lowered = text.lower()
+        for words, label, case_insensitive in HINTS:
+            if any(word in (lowered if case_insensitive else text) for word in words):
+                key = (label, text[:120])
+                if key not in seen:
+                    seen.add(key)
+                    found.append({"label": label, "string": text[:120]})
                 break
-    return trovati[:limite]
+    return found[:limit]
 
 
-def scheda(percorso: str | Path, modo: int | None = None, stringhe: bool = True) -> dict:
-    """Scheda completa di un file: protezioni, superficie, indizi, punteggio.
+def card(path: str | Path, mode: int | None = None, strings: bool = True) -> dict:
+    """Full card for one file: protections, surface, hints, score.
 
-    `modo` è il modo del file sul filesystem (per vedere setuid/setgid); se non c'è,
-    i bit di privilegio restano sconosciuti. `stringhe=False` salta l'estrazione delle
-    stringhe, che su un binario molto grande è la parte più lenta.
+    `mode` is the file mode on the filesystem (to see setuid/setgid); without it the
+    privilege bits stay unknown. `strings=False` skips string extraction, which is the
+    slowest part on a very large binary.
     """
-    percorso = Path(percorso)
-    base = {"percorso": str(percorso), "nome": percorso.name, "dimensione": percorso.stat().st_size
-            if percorso.exists() else 0}
+    path = Path(path)
+    base = {"path": str(path), "name": path.name,
+            "size": path.stat().st_size if path.exists() else 0}
 
-    setuid = bool(modo is not None and modo & 0o4000)
-    setgid = bool(modo is not None and modo & 0o2000)
+    setuid = bool(mode is not None and mode & 0o4000)
+    setgid = bool(mode is not None and mode & 0o2000)
     base["setuid"], base["setgid"] = setuid, setgid
 
-    if compr_elf_qnx(percorso):
-        base.update({"tipo_file": "elf-compresso-qnx", "nota":
-                     "ELF compresso QNX (iwlyfmbp): va scompattato prima di analizzarlo"})
+    if is_qnx_compressed(path):
+        base.update({"file_type": "qnx-compressed-elf", "note":
+                     "compressed QNX ELF (iwlyfmbp): decompress it before analysing"})
         return base
-    if not e_elf(percorso):
-        base.update({"tipo_file": "non-elf"})
+    if not is_elf(path):
+        base.update({"file_type": "not-elf"})
         return base
 
     try:
-        elfo = Elfo(percorso)
-    except ErroreElf as errore:
-        base.update({"tipo_file": "elf-illeggibile", "nota": str(errore)})
+        elf = Elf(path)
+    except ElfError as error:
+        base.update({"file_type": "unreadable-elf", "note": str(error)})
         return base
-    except OSError as errore:
-        base.update({"tipo_file": "errore", "nota": str(errore)})
+    except OSError as error:
+        base.update({"file_type": "error", "note": str(error)})
         return base
 
-    superficie = _simboli_in(elfo, SUPERFICIE_QNX)
-    privilegio = _simboli_in(elfo, PRIVILEGIO)
-    esecuzione = _simboli_in(elfo, ESECUZIONE)
-    insidiose = sorted(nome for nome in elfo.simboli if nome in INSIDIOSE)
-    protezioni_ = protezioni(elfo)
-    assenti = mancanti(elfo)
+    surface = _symbols_in(elf, QNX_SURFACE)
+    privilege = _symbols_in(elf, PRIVILEGE)
+    execution = _symbols_in(elf, EXECUTION)
+    risky = sorted(name for name in elf.symbols if name in RISKY_FUNCTIONS)
+    found_protections = protections(elf)
+    missing = missing_protections(elf)
 
-    punteggio = 0
-    punteggio += 3 if setuid else 0
-    punteggio += 2 if setgid else 0
-    punteggio += 2 * len([a for a in assenti if a in ("canary", "NX")])
-    punteggio += 1 * len([a for a in assenti if a in ("PIE", "RELRO")])
-    punteggio += 2 if esecuzione else 0
-    punteggio += 1 if insidiose else 0
-    punteggio += 2 if superficie else 0
+    score = 0
+    score += 3 if setuid else 0
+    score += 2 if setgid else 0
+    score += 2 * len([item for item in missing if item in ("canary", "NX")])
+    score += 1 * len([item for item in missing if item in ("PIE", "RELRO")])
+    score += 2 if execution else 0
+    score += 1 if risky else 0
+    score += 2 if surface else 0
 
-    bersaglio = bool(superficie or setuid) and bool({"canary", "PIE", "NX"} & set(assenti))
+    target = bool(surface or setuid) and bool({"canary", "PIE", "NX"} & set(missing))
 
     base.update({
-        "tipo_file": "elf",
-        "qnx": e_qnx(elfo),
-        "architettura": elfo.architettura,
-        "tipo": elfo.tipo_nome,
-        "protezioni": protezioni_,
-        "protezioni_assenti": assenti,
-        "superficie": superficie,
-        "privilegio": privilegio,
-        "esecuzione": esecuzione,
-        "funzioni_insidiose": insidiose,
-        "richieste": sorted(elfo.richieste),
-        "rpath": elfo.rpath,
-        "indizi": indizi_stringhe(elfo) if stringhe else [],
-        "punteggio": punteggio,
-        "bersaglio": bersaglio,
+        "file_type": "elf",
+        "qnx": is_qnx(elf),
+        "architecture": elf.architecture,
+        "type": elf.type_name,
+        "protections": found_protections,
+        "missing_protections": missing,
+        "surface": surface,
+        "privilege": privilege,
+        "execution": execution,
+        "risky_functions": risky,
+        "needed": sorted(elf.needed),
+        "rpath": elf.rpath,
+        "hints": string_hints(elf) if strings else [],
+        "score": score,
+        "target": target,
     })
     return base
