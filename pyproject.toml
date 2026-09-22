@@ -4,18 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qnxsec"
-version = "0.1.0"
-description = "Static analysis for QNX firmware and systems: protections, IPC surface, targets"
+version = "0.2.0"
+description = "Static analysis for QNX systems and firmware: protections, IPC surface, targets"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Andrea Gordanelli" }]
-keywords = ["qnx", "firmware", "security", "reverse-engineering", "embedded", "neutrino"]
+keywords = ["qnx", "firmware", "security", "reverse-engineering", "static-analysis"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Intended Audience :: Information Technology",
   "License :: OSI Approved :: MIT License",
-  "Operating System :: POSIX",
   "Programming Language :: Python :: 3",
   "Topic :: Security",
 ]
@@ -33,3 +29,4 @@ packages = ["qnxsec"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
