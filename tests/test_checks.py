@@ -1,65 +1,65 @@
-"""I controlli: protezioni, superficie QNX, privilegi, punteggio."""
+"""The checks: protections, QNX surface, privileges, score."""
 from __future__ import annotations
 
 from qnxsec import checks
 
 
-def test_scheda_di_un_binario(binario_protetto):
-    scheda = checks.scheda(binario_protetto)
-    assert scheda["tipo_file"] == "elf"
-    assert scheda["qnx"] is True                      # ha resmgr_attach e MsgReceive
-    assert scheda["protezioni"]["canary"] is True
-    assert scheda["protezioni_assenti"] == []
-    etichette = [voce["etichetta"] for voce in scheda["superficie"]]
-    assert any("resource manager" in etichetta for etichetta in etichette)
-    assert "strcpy" in scheda["funzioni_insidiose"]
+def test_card_for_a_binary(hardened_binary):
+    entry = checks.card(hardened_binary)
+    assert entry["file_type"] == "elf"
+    assert entry["qnx"] is True                        # it has resmgr_attach and MsgReceive
+    assert entry["protections"]["canary"] is True
+    assert entry["missing_protections"] == []
+    labels = [item["label"] for item in entry["surface"]]
+    assert any("resource manager" in label for label in labels)
+    assert "strcpy" in entry["risky_functions"]
 
 
-def test_indizi_nelle_stringhe(binario_protetto):
-    scheda = checks.scheda(binario_protetto)
-    etichette = [voce["etichetta"] for voce in scheda["indizi"]]
-    assert any("PPS" in etichetta for etichetta in etichette)
-    assert any("configurazione" in etichetta for etichetta in etichette)
-    assert any("segreto" in etichetta for etichetta in etichette)
+def test_string_hints(hardened_binary):
+    entry = checks.card(hardened_binary)
+    labels = [item["label"] for item in entry["hints"]]
+    assert any("PPS" in label for label in labels)
+    assert any("configuration" in label for label in labels)
+    assert any("secret" in label for label in labels)
 
 
-def test_setuid_alza_il_punteggio(binario_nudo):
-    senza = checks.scheda(binario_nudo, modo=0o755)
-    con = checks.scheda(binario_nudo, modo=0o4755)
-    assert senza["setuid"] is False and con["setuid"] is True
-    assert con["punteggio"] > senza["punteggio"]
-    assert con["bersaglio"] is True
+def test_setuid_raises_the_score(bare_binary):
+    without = checks.card(bare_binary, mode=0o755)
+    with_setuid = checks.card(bare_binary, mode=0o4755)
+    assert without["setuid"] is False and with_setuid["setuid"] is True
+    assert with_setuid["score"] > without["score"]
+    assert with_setuid["target"] is True
 
 
-def test_senza_stringhe_non_si_ferma(binario_protetto):
-    scheda = checks.scheda(binario_protetto, stringhe=False)
-    assert scheda["indizi"] == []
-    assert scheda["tipo_file"] == "elf"
+def test_no_strings_still_works(hardened_binary):
+    entry = checks.card(hardened_binary, strings=False)
+    assert entry["hints"] == []
+    assert entry["file_type"] == "elf"
 
 
-def test_file_compresso_qnx(tmp_path):
-    compresso = tmp_path / "compresso"
-    compresso.write_bytes(b"iwlyfmbp" + b"\0" * 64)
-    scheda = checks.scheda(compresso)
-    assert scheda["tipo_file"] == "elf-compresso-qnx"
-    assert "scompattato" in scheda["nota"]
+def test_qnx_compressed_file(tmp_path):
+    compressed = tmp_path / "compressed"
+    compressed.write_bytes(b"iwlyfmbp" + b"\0" * 64)
+    entry = checks.card(compressed)
+    assert entry["file_type"] == "qnx-compressed-elf"
+    assert "decompress" in entry["note"]
 
 
-def test_file_qualunque(tmp_path):
-    testo = tmp_path / "note.txt"
-    testo.write_text("ciao\n")
-    assert checks.scheda(testo)["tipo_file"] == "non-elf"
+def test_plain_file(tmp_path):
+    text = tmp_path / "notes.txt"
+    text.write_text("hello\n")
+    assert checks.card(text)["file_type"] == "not-elf"
 
 
-def test_binario_troncato_non_esplode(tmp_path, binario_nudo):
-    tronco = tmp_path / "tronco"
-    tronco.write_bytes(open(binario_nudo, "rb").read()[:120])
-    scheda = checks.scheda(tronco)
-    assert scheda["tipo_file"] in ("elf-illeggibile", "elf")
+def test_truncated_binary_does_not_explode(tmp_path, bare_binary):
+    truncated = tmp_path / "truncated"
+    truncated.write_bytes(open(bare_binary, "rb").read()[:120])
+    entry = checks.card(truncated)
+    assert entry["file_type"] in ("unreadable-elf", "elf")
 
 
-def test_mancanti_ordine_di_peso(binario_nudo):
-    from qnxsec.elf import Elfo
-    assenti = checks.mancanti(Elfo(binario_nudo))
-    assert "canary" in assenti and "NX" in assenti
-    assert assenti.index("canary") < assenti.index("PIE")
+def test_missing_protections_order_by_weight(bare_binary):
+    from qnxsec.elf import Elf
+    missing = checks.missing_protections(Elf(bare_binary))
+    assert "canary" in missing and "NX" in missing
+    assert missing.index("canary") < missing.index("PIE")

@@ -1,4 +1,4 @@
-"""La riga di comando, provata end-to-end."""
+"""The command line, exercised end to end."""
 from __future__ import annotations
 
 import json
@@ -6,41 +6,41 @@ import json
 from qnxsec import cli
 
 
-def test_comando_file(binario_nudo, capsys):
-    assert cli.main(["file", binario_nudo]) == 0
-    uscita = capsys.readouterr().out
-    assert "nudo" in uscita
-    assert "canary" in uscita
+def test_file_command(bare_binary, capsys):
+    assert cli.main(["file", bare_binary]) == 0
+    output = capsys.readouterr().out
+    assert "bare" in output
+    assert "canary" in output
 
 
-def test_comando_file_json(binario_nudo, capsys):
-    assert cli.main(["file", binario_nudo, "--json"]) == 0
-    dati = json.loads(capsys.readouterr().out)
-    assert dati["tipo_file"] == "elf"
-    assert dati["protezioni"]["canary"] is False
+def test_file_command_json(bare_binary, capsys):
+    assert cli.main(["file", bare_binary, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["file_type"] == "elf"
+    assert data["protections"]["canary"] is False
 
 
-def test_comando_firmware(albero, capsys):
-    assert cli.main(["firmware", albero]) == 0
-    uscita = capsys.readouterr().out
-    assert "SINTESI" in uscita
-    assert "conprivilegi" in uscita
+def test_firmware_command(tree, capsys):
+    assert cli.main(["firmware", tree]) == 0
+    output = capsys.readouterr().out
+    assert "SIGNALS" in output
+    assert "privileged" in output
 
 
-def test_comando_firmware_json_senza_schede(albero, capsys):
-    assert cli.main(["firmware", albero, "--json"]) == 0
-    dati = json.loads(capsys.readouterr().out)
-    assert "riassunto" in dati
-    assert "schede" not in dati
+def test_firmware_command_json_without_cards(tree, capsys):
+    assert cli.main(["firmware", tree, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "summary" in data
+    assert "cards" not in data
 
 
-def test_comando_firmware_json_con_schede(albero, capsys):
-    assert cli.main(["firmware", albero, "--json", "--schede"]) == 0
-    dati = json.loads(capsys.readouterr().out)
-    assert dati["schede"]
+def test_firmware_command_json_with_cards(tree, capsys):
+    assert cli.main(["firmware", tree, "--json", "--details"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["cards"]
 
 
-def test_comando_sconosciuto_non_esplode():
+def test_no_command_exits():
     from pytest import raises
     with raises(SystemExit):
         cli.main([])
