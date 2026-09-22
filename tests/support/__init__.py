@@ -1,1 +1,1 @@
-"""Supporto ai test (costruttori di immagini, campioni)."""
+"""Test support: IFS image builders and samples."""
