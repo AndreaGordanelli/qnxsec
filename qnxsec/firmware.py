@@ -81,9 +81,10 @@ def summarise(root, cards: list[dict], count: int, compressed: int, others: int,
             continue
         missing = ", ".join(entry["missing_protections"]) or "nothing"
         surface_item = ", ".join(item["label"] for item in entry["surface"][:2]) or "—"
-        privilege = " setuid" if entry["setuid"] else ""
-        ranked.append(f"{entry['score']:>3}  {entry['name']} ({entry['architecture']},"
-                      f"{privilege}) — missing: {missing} — {surface_item}")
+        kind = "setuid" if entry["setuid"] else ("setgid" if entry["setgid"] else "")
+        where = f"{entry['architecture']}, {kind}" if kind else entry["architecture"]
+        ranked.append(f"{entry['score']:>3}  {entry['name']} ({where}) — "
+                      f"missing: {missing} — {surface_item}")
     return {
         "root": str(root),
         "files": count,
