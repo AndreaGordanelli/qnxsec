@@ -18,8 +18,12 @@ jobs:
           python-version: ${{ matrix.python }}
       # liblzo2 lets the suite check the pure Python decoder against streams from
       # the reference library; without it those tests skip instead of pretending.
-      - name: install liblzo2 and a compiler
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq liblzo2-dev build-essential
+      - name: install the reference compression libraries and a compiler
+        # The suite checks both decoders against streams produced by liblzo2 and
+        # libucl themselves; without them those tests skip instead of pretending.
+        run: >-
+          sudo apt-get update -qq && sudo apt-get install -y -qq
+          liblzo2-dev libucl-dev build-essential
       - name: install
         run: pip install -e ".[dev]"
       - name: test
