@@ -72,9 +72,11 @@ Compressed binaries:
 
 - the `iwlyfmbp` container structure: declared size, block size, algorithm
   (LZO1X or UCL/NRV2B), block map and stored sizes;
-- **LZO1X payloads are decompressed**, block by block, with a decoder written here and
-  checked against streams produced by the reference library itself. UCL/NRV2B is refused
-  rather than guessed: it will be written the same way, against the library.
+- **both payloads are decompressed**, block by block, with decoders written here and
+  checked against streams produced by the reference libraries themselves;
+- **images compressed as a whole are read too**: QNX writes the filesystem as a chain of
+  compressed chunks behind a startup header, which is the usual shape of flash firmware,
+  and both algorithms are handled there as well.
 
 Two builds of the same binary:
 
@@ -85,9 +87,6 @@ Two builds of the same binary:
 
 ## Not there yet
 
-- **UCL/NRV2B payloads.** The LZO1X side is written and verified; the NRV2B decoder is
-  not, so `decompress()` refuses those containers instead of returning bytes nobody has
-  checked.
 - On-device review script for QNX 7/8, with a summary and a diff between two runs.
 - Testing against real QNX images (Raspberry Pi quick-start image, QEMU x86 target).
 
@@ -97,10 +96,11 @@ Fixtures are compiled at test time with explicit flags, so results do not depend
 hardening defaults of the distribution. IFS images are assembled in memory by a builder
 written from the documented layout, so a disagreement about an offset fails the tests.
 
-The LZO1X decoder is checked against streams produced by liblzo2 itself through
-`tools/lzo_ref.c`: a shared misunderstanding of the format cannot pass unnoticed, because
-the reference bytes come from the library QNX links against. Where no compiler or no
-liblzo2 is available those tests skip instead of passing quietly.
+Both decoders are checked against streams produced by the real libraries through
+`tools/lzo_ref.c` and `tools/ucl_ref.c`: a shared misunderstanding of the format cannot
+pass unnoticed, because the reference bytes come from the libraries QNX links against.
+Where no compiler, no liblzo2 or no libucl is available those tests skip instead of
+passing quietly.
 
 ```bash
 pip install -e ".[dev]"

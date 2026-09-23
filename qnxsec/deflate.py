@@ -17,10 +17,10 @@ Each block then carries an eight-byte header:
     6   2   uncompressed size of this block
 
 This module reads that structure: how big the file really is, how it is split and with
-which algorithm, and it decompresses LZO1X payloads with the decoder in
-:mod:`qnxsec.lzo` -- checked against the reference library, not against itself.
-UCL/NRV2B is still refused: a decompressor that quietly returns wrong bytes is worse
-than no decompressor at all.
+which algorithm, and it decompresses the payload with the decoders in
+:mod:`qnxsec.lzo` and :mod:`qnxsec.ucl` -- both checked against the reference
+libraries, not against themselves.  An algorithm without a verified decoder is
+refused: a decompressor that quietly returns wrong bytes is worse than none.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from qnxsec import lzo
+from qnxsec import lzo, ucl
 
 MAGIC = b"iwlyfmbp"
 HEADER_SIZE = 16
@@ -144,22 +144,24 @@ def parse_file(path: str | Path) -> Container:
 def decompress(container: Container, data: bytes) -> bytes:
     """Decompress the payload, block by block.
 
-    LZO1X is implemented in :mod:`qnxsec.lzo` and checked against streams from the
-    reference library, so the bytes this returns can be trusted.  UCL/NRV2B still
-    raises: a decompressor that returns wrong bytes silently is worse than one that
-    refuses to try.
+    LZO1X and UCL/NRV2B are both implemented in this package and checked against
+    streams from the reference libraries, so the bytes this returns can be
+    trusted.  Anything else raises: a decompressor that returns wrong bytes
+    silently is worse than one that refuses to try.
 
     ``data`` is the whole file, because the block map holds offsets into it.
     """
-    if container.compression != "lzo1x":
+    decoders = {"lzo1x": lzo.decompress, "ucl/nrv2b": ucl.decompress}
+    decoder = decoders.get(container.compression)
+    if decoder is None:
         raise DeflateError(
             f"{container.compression or 'unknown'} payloads are not decompressed yet: "
-            "only LZO1X is implemented and verified so far")
+            "only LZO1X and UCL/NRV2B are implemented and verified")
 
     payload = bytearray()
     for block in container.blocks:
         chunk = data[block.data_offset:block.data_offset + block.data_size]
-        decoded, _ = lzo.decompress(chunk, expected_size=block.size)
+        decoded, _ = decoder(chunk, expected_size=block.size)
         payload.extend(decoded)
     return bytes(payload)
 

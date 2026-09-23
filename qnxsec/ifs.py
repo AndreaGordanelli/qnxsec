@@ -4,6 +4,9 @@ An IFS is the bootable filesystem QNX puts in flash: a header, a chain of direct
 entries and the file payloads. Firmware dumps usually contain one or more of them,
 sometimes at an offset inside a larger image, sometimes chained one after another.
 
+A bootable image is usually compressed.  A startup header comes first and the
+filesystem follows as a chain of compressed chunks; both are handled here.
+
 Layout (little-endian, as documented in QNX's image.h):
 
     struct image_header {
@@ -45,6 +48,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from qnxsec import lzo, ucl
 
 SIGNATURE = b"imagefs"
 SIGNATURE_REVERSED = b"sfegami"
@@ -318,6 +323,51 @@ class Image:
 
 # --------------------------------------------------------------------- helpers
 
+STARTUP_SIGNATURE = 0x00FF7EEB
+"""The QNX startup header magic at the start of a bootable image."""
+
+COMPRESSION_TYPES = {0: "none", 1: "zlib", 2: "lzo", 3: "ucl/nrv2b"}
+"""What the startup header records in bits 2..4 of flags1."""
+
+STARTUP_HEADER_SIZE = 52
+
+
+def startup_header(data: bytes, offset: int = 0) -> dict | None:
+    """Read the startup header that precedes a bootable image, when there is one.
+
+    Bits 2..4 of ``flags1`` say whether the image that follows is compressed and
+    with which algorithm.  Images destined for flash are almost always
+    compressed, so a reader that ignores this reads nothing at all.
+    """
+    if offset < 0 or offset + STARTUP_HEADER_SIZE > len(data):
+        return None
+    raw = data[offset:offset + 4]
+    if int.from_bytes(raw, "little") == STARTUP_SIGNATURE:
+        order = "little"
+    elif int.from_bytes(raw, "big") == STARTUP_SIGNATURE:
+        order = "big"
+    else:
+        return None
+    flags1 = data[offset + 6]
+    kind = (flags1 & 0x1C) >> 2
+    return {
+        "offset": offset,
+        "flags1": flags1,
+        "compression": COMPRESSION_TYPES.get(kind, f"type {kind}"),
+        "startup_size": int.from_bytes(data[offset + 32:offset + 36], order),
+        "stored_size": int.from_bytes(data[offset + 36:offset + 40], order),
+        "imagefs_size": int.from_bytes(data[offset + 44:offset + 48], order),
+    }
+
+
+def _decompressor(name: str):
+    """The decoder for an algorithm name, or None when there is none verified."""
+    if name == "lzo":
+        return lzo.decompress
+    if name == "ucl/nrv2b":
+        return ucl.decompress
+    return None
+
 
 def find_images(data: bytes, limit: int = 32) -> list[int]:
     """Offsets of every 'imagefs' signature in a buffer (both byte orders)."""
@@ -334,8 +384,50 @@ def find_images(data: bytes, limit: int = 32) -> list[int]:
     return offsets
 
 
+def decompress_image(data: bytes, offset: int, algorithm: str) -> bytes:
+    """Decode the chunk chain that makes up a compressed image.
+
+    QNX does not write one long compression stream: it writes a chain of chunks,
+    each preceded by a two byte big-endian length, ended by a zero length.  Every
+    chunk is an independent stream.  This is what ``dumpifs`` does, and the two
+    implementations have to agree on it.
+    """
+    decoder = _decompressor(algorithm)
+    if decoder is None:
+        raise ImageError("no verified decoder for %s" % algorithm)
+
+    payload = bytearray()
+    position = offset
+    while position + 2 <= len(data):
+        size = int.from_bytes(data[position:position + 2], "big")
+        position += 2
+        if size == 0:
+            break
+        if position + size > len(data):
+            raise ImageError("a compressed chunk runs past the end of the file")
+        # Decode the chunk on its own: a stream told where the next chunk starts
+        # would happily run into it, and the boundary is part of the format.
+        chunk, used = decoder(data[position:position + size])
+        if used != size:
+            raise ImageError(
+                "a compressed chunk declared %d bytes and used %d" % (size, used))
+        payload.extend(chunk)
+        position += size
+    return bytes(payload)
+
+
 def open_image(data: bytes, offset: int = 0, source: str = "") -> Image:
-    """Parse the image starting at `offset`."""
+    """Parse the image starting at `offset`, decompressing it if QNX compressed it.
+
+    A compressed image carries a startup header first and the filesystem follows
+    as a chain of compressed chunks.  When there is no verified decoder for the
+    recorded algorithm this raises, instead of reporting an empty image.
+    """
+    header = startup_header(data, offset)
+    if header and header["compression"] != "none":
+        payload = decompress_image(data, offset + header["startup_size"],
+                                   header["compression"])
+        return Image(data=payload, offset=0, source=source).parse()
     return Image(data=data, offset=offset, source=source).parse()
 
 
@@ -344,6 +436,16 @@ def images_in_file(path: str | Path, limit: int = 8) -> list[Image]:
     path = Path(path)
     data = path.read_bytes()
     found = []
+
+    # A compressed image hides its signature inside compressed bytes, so the raw
+    # scan cannot find it: the startup header at the front is the way in.
+    header = startup_header(data, 0)
+    if header and header["compression"] != "none":
+        try:
+            found.append(open_image(data, 0, source=f"{path}@0x0 ({header['compression']})"))
+        except ImageError:
+            pass
+
     for offset in find_images(data, limit=limit):
         try:
             found.append(open_image(data, offset, source=f"{path}@{offset:#x}"))

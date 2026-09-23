@@ -6,11 +6,15 @@ import struct
 import pytest
 
 from qnxsec import deflate, lzo
-from tests.support import lzo_reference
+from tests.support import lzo_reference, ucl_reference
 
 needs_reference = pytest.mark.skipif(
     lzo_reference.path() is None,
     reason="no compiler or no liblzo2, the reference compressor cannot be built")
+
+needs_ucl = pytest.mark.skipif(
+    ucl_reference.path() is None,
+    reason="no compiler or no libucl, the reference compressor cannot be built")
 
 
 def build_container(chunks: list[bytes], block_size: int = 4096, kind: int = 1,
@@ -30,11 +34,11 @@ def build_container(chunks: list[bytes], block_size: int = 4096, kind: int = 1,
     return bytes(out)
 
 
-def build_lzo_container(payloads: list[bytes], streams: list[bytes],
-                        block_size: int = 4096) -> bytes:
-    """A container whose blocks declare the uncompressed size and hold the LZO stream."""
+def build_compressed_container(payloads: list[bytes], streams: list[bytes],
+                               block_size: int = 4096, kind: int = 0) -> bytes:
+    """A container whose blocks declare the uncompressed size and hold the stream."""
     total = sum(len(payload) for payload in payloads)
-    out = bytearray(deflate.MAGIC + struct.pack("<IHB", total, block_size, 0) + b"\0")
+    out = bytearray(deflate.MAGIC + struct.pack("<IHB", total, block_size, kind) + b"\0")
     previous_next = 0
     previous_size = 0
     for payload, stream in zip(payloads, streams):
@@ -100,12 +104,15 @@ def test_rejects_other_data():
         deflate.parse(b"short")
 
 
-def test_ucl_payloads_are_refused_for_now():
-    """NRV2B is not implemented: refusing beats returning bytes nobody has checked."""
-    container = deflate.parse(build_container([b"a" * 8]))
-    with pytest.raises(deflate.DeflateError) as error:
-        deflate.decompress(container, b"")
-    assert "not decompressed yet" in str(error.value)
+def test_ucl_blocks_are_decompressed(tmp_path):
+    """The other QNX algorithm must round trip just as exactly."""
+    payloads = [b"first block " * 60, bytes(range(256)) * 40, b"last"]
+    streams = [ucl_reference.compress(payload, tmp_path) for payload in payloads]
+    data = build_compressed_container(payloads, streams, kind=1)
+    container = deflate.parse(data, path="firmware/proc/boot/compressed")
+    assert container.compression == "ucl/nrv2b"
+    assert container.complete is True
+    assert deflate.decompress(container, data) == b"".join(payloads)
 
 
 @needs_reference
@@ -113,7 +120,7 @@ def test_lzo_blocks_are_decompressed(tmp_path):
     """Blocks compressed by the reference library must come back byte for byte."""
     payloads = [b"first block " * 60, bytes(range(256)) * 40, b"last"]
     streams = [lzo_reference.compress(payload, tmp_path) for payload in payloads]
-    data = build_lzo_container(payloads, streams)
+    data = build_compressed_container(payloads, streams)
     container = deflate.parse(data, path="firmware/proc/boot/compressed")
     assert container.compression == "lzo1x"
     assert container.complete is True
@@ -124,7 +131,7 @@ def test_lzo_blocks_are_decompressed(tmp_path):
 def test_a_block_that_decodes_to_the_wrong_size_is_refused(tmp_path):
     """The declared block size is a check, not decoration."""
     payload = b"payload" * 100
-    data = build_lzo_container([payload], [lzo_reference.compress(payload, tmp_path)])
+    data = build_compressed_container([payload], [lzo_reference.compress(payload, tmp_path)])
     container = deflate.parse(data)
     container.blocks[0].size = 7        # a lie the decoder must catch
     with pytest.raises(lzo.LzoError):
