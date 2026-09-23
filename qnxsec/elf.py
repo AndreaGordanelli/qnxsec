@@ -34,8 +34,11 @@ MACHINES = {
 }
 # segments we care about
 PT_INTERP, PT_DYNAMIC, PT_GNU_STACK, PT_GNU_RELRO = 3, 2, 0x6474E551, 0x6474E552
+PT_LOAD = 1
 PF_X, PF_W, PF_R = 1, 2, 4
 SHT_SYMTAB, SHT_DYNSYM, SHT_STRTAB = 2, 11, 3
+STT_FUNC = 2
+STB_GLOBAL, STB_WEAK = 1, 2
 # dynamic entries
 DT_NEEDED, DT_SONAME, DT_RPATH, DT_RUNPATH, DT_BIND_NOW, DT_FLAGS = 1, 14, 15, 29, 24, 30
 DT_FLAGS_1 = 0x6FFFFFFB
@@ -247,6 +250,57 @@ class Elf:
         """Printable strings, like `strings` but in-house: one scan, not a loop per byte."""
         pattern = _string_pattern(minimum)
         return {piece.decode("ascii", "replace") for piece in pattern.findall(self.data)}
+
+    def function_symbols(self) -> dict[str, dict]:
+        """Named functions that describe a body: ``{name: {value, size, global}}``.
+
+        Only ``STT_FUNC`` symbols with a non-zero size are returned -- those are
+        the ones a build-to-build comparison can hash.  ``.symtab`` wins over
+        ``.dynsym`` when both carry the same name.
+        """
+        found: dict[str, dict] = {}
+        for section in self.sections:
+            if section["type"] not in (SHT_SYMTAB, SHT_DYNSYM) or not section["entsize"]:
+                continue
+            if section["link"] >= len(self.sections):
+                continue
+            strings = self.sections[section["link"]]
+            count = section["size"] // section["entsize"]
+            for index in range(count):
+                offset = section["offset"] + index * section["entsize"]
+                try:
+                    if self.elf_class == 64:
+                        name_off, info, _, _, value, size = self._unpack("IBBHQQ", offset)
+                    else:
+                        name_off, value, size, info, _, _ = self._unpack("IIIBBH", offset)
+                except ElfError:
+                    break
+                if (info & 0xF) != STT_FUNC or not size:
+                    continue
+                name = self._string(strings["offset"], strings["size"], name_off)
+                if not name:
+                    continue
+                if name in found and section["type"] == SHT_DYNSYM:
+                    continue
+                found[name] = {"value": value, "size": size,
+                               "global": (info >> 4) in (STB_GLOBAL, STB_WEAK)}
+        return found
+
+    def offset_of(self, vaddr: int) -> int | None:
+        """File offset holding a virtual address, through the PT_LOAD segments."""
+        for segment in self.segments:
+            if segment["type"] != PT_LOAD or not segment["filesz"]:
+                continue
+            if segment["vaddr"] <= vaddr < segment["vaddr"] + segment["filesz"]:
+                return segment["offset"] + (vaddr - segment["vaddr"])
+        return None
+
+    def function_body(self, symbol: dict) -> bytes | None:
+        """The bytes of one ``function_symbols()`` entry, or None if unmapped."""
+        offset = self.offset_of(symbol["value"])
+        if offset is None or offset + symbol["size"] > len(self.data):
+            return None
+        return self.data[offset:offset + symbol["size"]]
 
     def __repr__(self) -> str:
         return f"<Elf {self.path.name} {self.architecture} {self.type_name}>"

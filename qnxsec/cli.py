@@ -7,6 +7,7 @@
     qnxsec compressed <file>        structure of a compressed QNX ELF (iwlyfmbp)
     qnxsec surface <folder>         who publishes which QNX name (graph exports)
     qnxsec dump <firmware dump>     the whole pipeline: find, extract, analyse, map
+    qnxsec diff <old> <new>         what changed between two builds of one binary
 """
 from __future__ import annotations
 
@@ -14,7 +15,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, bootscript, checks, deflate, firmware, ifs, report, surface
+from . import (__version__, bootscript, checks, deflate, diff, elf, firmware, ifs,
+               report, surface)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
     dump.add_argument("--extract", metavar="DIR", help="where to unpack (default: none)")
     dump.add_argument("--json", action="store_true")
     dump.add_argument("--targets", type=int, default=15)
+
+    comparison = subparsers.add_parser(
+        "diff", help="what changed between two builds of one binary")
+    comparison.add_argument("old", help="the earlier build")
+    comparison.add_argument("new", help="the later build")
+    comparison.add_argument("--json", action="store_true")
+    comparison.add_argument("--limit", type=int, default=40,
+                            help="how many names to print per section (default 40)")
     return parser
 
 
@@ -79,6 +89,19 @@ def _do_firmware(options) -> int:
         print(report.to_json(result if options.details else {"summary": result["summary"]}))
     else:
         print(report.summary_text(result["summary"], options.targets))
+    return 0
+
+
+def _do_diff(options) -> int:
+    try:
+        result = diff.compare(options.old, options.new)
+    except (elf.ElfError, diff.DiffError) as error:
+        print(f"Cannot compare these two files: {error}")
+        return 1
+    if options.json:
+        print(report.to_json(diff.as_dict(result)))
+    else:
+        print(diff.render(result, options.limit))
     return 0
 
 
@@ -238,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     options = build_parser().parse_args(argv)
     handlers = {"file": _do_file, "firmware": _do_firmware, "ifs": _do_ifs,
                 "bootscript": _do_bootscript, "compressed": _do_compressed,
-                "surface": _do_surface, "dump": _do_dump}
+                "surface": _do_surface, "dump": _do_dump, "diff": _do_diff}
     handler = handlers.get(options.command)
     if handler is None:
         return 1
