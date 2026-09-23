@@ -33,6 +33,7 @@ qnxsec bootscript unpacked/image1/proc/boot/.script
 qnxsec compressed unpacked/image1/bin/devc-ser8250
 qnxsec firmware unpacked/image1 --targets 20     # per-binary analysis of a tree
 qnxsec surface unpacked/image1 --dot graph.dot   # who publishes which QNX name
+qnxsec diff old.so new.so                        # what changed between two builds
 qnxsec file /path/to/binary --json
 ```
 
@@ -74,6 +75,13 @@ Compressed binaries:
 - **LZO1X payloads are decompressed**, block by block, with a decoder written here and
   checked against streams produced by the reference library itself. UCL/NRV2B is refused
   rather than guessed: it will be written the same way, against the library.
+
+Two builds of the same binary:
+
+- which functions changed and by how much, which were added, which were removed;
+- which differ only in the addresses they refer to inside the same file — the same code
+  once those references are masked, which is what makes a one-function fix visible on a
+  file where everything moved.
 
 ## Not there yet
 
